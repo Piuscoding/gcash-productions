@@ -16,6 +16,10 @@ const sendMoneySchema = new mongoose.Schema({
   note: {
     type: String,
   },
+  recipient_name: {
+    type: String,
+    default: null, // Optional field for non-registered recipients
+  },
   owner: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'user',

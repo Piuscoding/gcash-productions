@@ -139,7 +139,9 @@ function loadRecentTransactions() {
   })
     .then((response) => {
       if (!response.ok) {
-        throw new Error('Failed to fetch transactions');
+        return response.json().then((errorData) => {
+          throw new Error(errorData.message || 'Failed to fetch transactions');
+        });
       }
       return response.json();
     })
@@ -186,7 +188,7 @@ function loadRecentTransactions() {
                 </div>
                 <div class="transaction-details">
                   <div class="transaction-title">${isCredit ? "Received from" : "Sent to"} ${
-                    isCredit ? transaction.senderName || "Unknown" : transaction.recipientName || "Unknown"
+                    isCredit ? transaction.senderName || "Unknown Sender" : transaction.recipientName || "Unknown Recipient"
                   }</div>
                   <div class="transaction-date">${formattedDate}</div>
                   ${transaction.note ? `<div class="transaction-note">${transaction.note}</div>` : ""}
@@ -205,7 +207,7 @@ function loadRecentTransactions() {
     .catch((error) => {
       console.error("Error fetching transactions:", error);
       if (noTransactionsElement) {
-        noTransactionsElement.textContent = "Error loading transactions";
+        noTransactionsElement.textContent = `Error loading transactions: ${error.message}`;
       }
     });
 }

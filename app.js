@@ -307,6 +307,7 @@ app.get('/api/user', requireAuth, async (req, res) => {
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
+
     res.status(200).json({
       success: true,
       user: {
@@ -324,46 +325,88 @@ app.get('/api/user', requireAuth, async (req, res) => {
   }
 });
 
-// New /api/transactions endpoint
+
+
 app.get('/api/transactions', requireAuth, async (req, res) => {
   try {
-    const user = await User.findById(req.userId).select('accNo first_name last_name');
-    if (!user) {
+    // Validate req.userId
+    if (!mongoose.Types.ObjectId.isValid(req.userId)) {
+      console.error('Invalid userId:', req.userId);
+      return res.status(400).json({ success: false, message: 'Invalid user ID' });
+    }
+
+    // Fetch sender
+    const sender = await User.findById(req.userId).lean();
+    if (!sender) {
+      console.error('User not found for userId:', req.userId);
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    // Fetch transactions where the user is either the sender or recipient
+    // Fetch transactions
     const transactions = await SendMoney.find({
       $or: [
-        { from: user.accNo },
-        { recipient_account: user.accNo },
+        { owner: req.userId }, // User is the sender
+        { recipient_account: sender.accNo || '' }, // User is the recipient
       ],
-    }).sort({ createdAt: -1 });
+    }).sort({ createdAt: -1 }).lean();
 
-    // Enrich transactions with sender and recipient names
-    const enrichedTransactions = await Promise.all(transactions.map(async (transaction) => {
-      const sender = await User.findOne({ accNo: transaction.from }).select('first_name last_name');
-      const recipient = await User.findOne({ accNo: transaction.recipient_account }).select('first_name last_name');
+    // Map transactions to include sender and recipient names
+    const transactionDetails = await Promise.all(
+      transactions.map(async (transaction) => {
+        let senderName = sender.first_name && sender.last_name
+          ? `${sender.first_name} ${sender.last_name}`
+          : 'Unknown Sender';
+        let recipientName;
 
-      return {
-        _id: transaction._id,
-        senderAccountNumber: transaction.from,
-        recipientAccountNumber: transaction.recipient_account,
-        senderName: sender ? `${sender.first_name} ${sender.last_name}` : 'Unknown',
-        recipientName: recipient ? `${recipient.first_name} ${recipient.last_name}` : 'Unknown',
-        amount: transaction.amount,
-        date: transaction.createdAt,
-        note: transaction.note,
-      };
-    }));
+        // If user is the sender
+        if (transaction.owner && transaction.owner.toString() === req.userId.toString()) {
+          if (transaction.recipient_name) {
+            // Use stored recipient_name for non-registered accounts
+            recipientName = transaction.recipient_name;
+          } else {
+            // Fetch recipient's name
+            const recipient = await User.findOne({ accNo: transaction.recipient_account }).lean();
+            recipientName = recipient && recipient.first_name && recipient.last_name
+              ? `${recipient.first_name} ${recipient.last_name}`
+              : 'Unknown Recipient';
+          }
+        } else {
+          // User is the recipient, so sender is the owner
+          const owner = transaction.owner && mongoose.Types.ObjectId.isValid(transaction.owner)
+            ? await User.findById(transaction.owner).lean()
+            : null;
+          senderName = owner && owner.first_name && owner.last_name
+            ? `${owner.first_name} ${owner.last_name}`
+            : 'Unknown Sender';
+          recipientName = senderName; // Current user
+        }
 
-    res.status(200).json({ success: true, transactions: enrichedTransactions });
+        return {
+          id: transaction._id,
+          senderAccountNumber: transaction.from || '',
+          recipientAccountNumber: transaction.recipient_account || '',
+          senderName,
+          recipientName,
+          amount: transaction.amount || 0,
+          date: transaction.createdAt || new Date(),
+          note: transaction.note || '',
+        };
+      })
+    );
+
+    res.status(200).json({
+      success: true,
+      transactions: transactionDetails,
+    });
   } catch (err) {
-    console.error('Error fetching transactions:', err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    console.error('Error in /api/transactions:', {
+      message: err.message,
+      stack: err.stack,
+      userId: req.userId,
+    });
+    res.status(500).json({ success: false, message: 'Error fetching transactions' });
   }
 });
-// start
 
 app.get('/send-money', requireAuth, async(req, res) => {
     try {
@@ -387,7 +430,7 @@ app.get('/send-money', requireAuth, async(req, res) => {
   });
   
   app.post('/send-money', requireAuth, async (req, res) => {
-    const { recipient_account, amount, note } = req.body;
+    const { recipient_account, amount, note, recipient_name } = req.body;
   
     try {
       if (!recipient_account || !amount) {
@@ -403,16 +446,26 @@ app.get('/send-money', requireAuth, async(req, res) => {
         throw Error('Insufficient balance');
       }
   
-      const recipient = await User.findOne({ accNo: recipient_account });
+      let recipient = await User.findOne({ accNo: recipient_account });
+      let isRecipientNotFound = false;
+  
       if (!recipient) {
-        throw Error('Recipient not found');
+        // If recipient not found, check if recipient_name is provided
+        if (!recipient_name || typeof recipient_name !== 'string' || recipient_name.trim() === '') {
+          throw Error('Recipient name is required for non-registered accounts');
+        }
+        isRecipientNotFound = true;
       }
   
-      // Update balances
+      // Update sender's balance
       sender.balance -= amount;
-      recipient.balance += amount;
       await sender.save();
-      await recipient.save();
+  
+      // Update recipient's balance only if recipient is found
+      if (!isRecipientNotFound) {
+        recipient.balance += amount;
+        await recipient.save();
+      }
   
       // Create transaction
       const transaction = new SendMoney({
@@ -421,23 +474,29 @@ app.get('/send-money', requireAuth, async(req, res) => {
         amount,
         note,
         owner: sender._id,
+        recipient_name: isRecipientNotFound ? recipient_name.trim() : null, // Store recipient_name if not found
       });
       await transaction.save();
+  
+      // Prepare transaction details for response
+      const transactionDetails = {
+        id: transaction._id,
+        senderAccountNumber: sender.accNo,
+        recipientAccountNumber: recipient_account,
+        senderName: `${sender.first_name} ${sender.last_name}`,
+        recipientName: isRecipientNotFound
+          ? recipient_name.trim()
+          : `${recipient.first_name} ${recipient.last_name}`,
+        amount: amount,
+        date: transaction.createdAt,
+        note: note,
+      };
   
       // Return transaction details
       res.status(200).json({
         success: true,
         redirect: '/confirmation',
-        transaction: {
-          id: transaction._id,
-          senderAccountNumber: sender.accNo,
-          recipientAccountNumber: recipient_account,
-          senderName: `${sender.first_name} ${sender.last_name}`,
-          recipientName: `${recipient.first_name} ${recipient.last_name}`,
-          amount: amount,
-          date: transaction.createdAt,
-          note: note,
-        },
+        transaction: transactionDetails,
       });
     } catch (err) {
       const errors = handleErrors(err);
@@ -508,20 +567,93 @@ app.post('/api/validate-otp', requireAuth, async (req, res) => {
     res.render("confirmation")
   })
   
-
-// end
-app.get('/transactions/:userId', requireAuth, async (req, res) => {
-  try {
-    const user = await User.findById(req.params.userId).select('-password -verificationCode -otp -otpExpires');
-    if (!user) {
-      return res.redirect('/login');
+  app.get('/api/transactions', requireAuth, async (req, res) => {
+    try {
+      const sender = await User.findById(req.userId);
+      if (!sender) {
+        return res.status(404).json({ success: false, message: 'User not found' });
+      }
+  
+      // Fetch transactions where the user is either the sender or recipient
+      const transactions = await SendMoney.find({
+        $or: [
+          { owner: req.userId }, // User is the sender
+          { recipient_account: sender.accNo }, // User is the recipient
+        ],
+      }).sort({ createdAt: -1 }); // Sort by newest first
+  
+      // Map transactions to include sender and recipient names
+      const transactionDetails = await Promise.all(
+        transactions.map(async (transaction) => {
+          let senderName = `${sender.first_name} ${sender.last_name}`; // Default to current user
+          let recipientName;
+  
+          // If user is the sender
+          if (transaction.owner.toString() === req.userId.toString()) {
+            if (transaction.recipient_name) {
+              // Use stored recipient_name for non-registered accounts
+              recipientName = transaction.recipient_name;
+            } else {
+              // Fetch recipient's name
+              const recipient = await User.findOne({ accNo: transaction.recipient_account });
+              recipientName = recipient
+                ? `${recipient.first_name} ${recipient.last_name}`
+                : 'Unknown';
+            }
+          } else {
+            // User is the recipient, so sender is the owner
+            const owner = await User.findById(transaction.owner);
+            senderName = owner
+              ? `${owner.first_name} ${owner.last_name}`
+              : 'Unknown';
+            recipientName = `${sender.first_name} ${sender.last_name}`; // Current user
+          }
+  
+          return {
+            id: transaction._id,
+            senderAccountNumber: transaction.from,
+            recipientAccountNumber: transaction.recipient_account,
+            senderName,
+            recipientName,
+            amount: transaction.amount,
+            date: transaction.createdAt,
+            note: transaction.note,
+          };
+        })
+      );
+  
+      res.status(200).json({
+        success: true,
+        transactions: transactionDetails,
+      });
+    } catch (err) {
+      console.error('Error fetching transactions:', err);
+      res.status(500).json({ success: false, message: 'Error fetching transactions' });
     }
-    res.render('transactions', { user });
-  } catch (err) {
-    console.error(err);
-    res.redirect('/dashboard');
-  }
-});
+  });
+
+  app.get('/transactions/:userId', requireAuth, async (req, res) => {
+    try {
+      const user = await User.findById(req.params.userId).select('-password -verificationCode -otp -otpExpires').lean();
+      if (!user) {
+        return res.redirect('/login');
+      }
+  
+      // Sanitize user object for frontend
+      const sanitizedUser = {
+        _id: user._id.toString(),
+        accNo: user.accNo || '',
+        first_name: user.first_name || '',
+        last_name: user.last_name || '',
+        balance: typeof user.balance === 'number' ? user.balance : 0, // Ensure balance is a number
+      };
+  
+      res.render('transactions', { user: sanitizedUser });
+    } catch (err) {
+      console.error(err);
+      res.redirect('/dashboard');
+    }
+  });
 
 app.get('/logout', (req, res) => {
     res.clearCookie('jwt');

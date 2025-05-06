@@ -76,6 +76,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Handle recipient account number input to auto-fetch recipient name
   const recipientAccountInput = document.getElementById("recipient-account");
   const recipientNameDisplay = document.getElementById("recipient-name-display");
+  const recipientNameInput = document.getElementById("recipient-name-input");
+  let recipientNotFound = false;
 
   if (recipientAccountInput) {
     recipientAccountInput.addEventListener("blur", () => {
@@ -92,18 +94,26 @@ document.addEventListener("DOMContentLoaded", async () => {
             if (data.success && data.user) {
               recipientNameDisplay.textContent = data.user.name;
               recipientNameDisplay.style.display = "block";
+              recipientNameInput.style.display = "none"; // Hide input
+              recipientNotFound = false;
             } else {
               recipientNameDisplay.textContent = "Recipient not found";
               recipientNameDisplay.style.display = "block";
+              recipientNameInput.style.display = "block"; // Show input
+              recipientNotFound = true;
             }
           })
           .catch((error) => {
             console.error("Error fetching recipient:", error);
             recipientNameDisplay.textContent = "Error fetching recipient";
             recipientNameDisplay.style.display = "block";
+            recipientNameInput.style.display = "block"; // Show input
+            recipientNotFound = true;
           });
       } else {
         recipientNameDisplay.style.display = "none";
+        recipientNameInput.style.display = "none";
+        recipientNotFound = false;
       }
     });
   }
@@ -137,6 +147,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Check if user has enough balance
       if (user && user.balance < Number(amountInput.value)) {
         errorMessage.textContent = "Insufficient funds";
+        errorMessage.style.display = "block";
+        return;
+      }
+
+      // Validate recipient name if account not found
+      if (recipientNotFound && !recipientNameInput.value.trim()) {
+        errorMessage.textContent = "Please enter the recipient's GCash account name";
         errorMessage.style.display = "block";
         return;
       }
@@ -192,6 +209,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         const amount = Number(amountInput.value);
         const recipientAccount = recipientAccountInput.value;
         const note = noteInput.value;
+        const recipientName = recipientNotFound ? recipientNameInput.value.trim() : undefined;
 
         const transactionResponse = await fetch("/send-money", {
           method: "POST",
@@ -202,6 +220,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             recipient_account: recipientAccount,
             amount: amount,
             note: note,
+            recipient_name: recipientName, // Include recipient name if provided
           }),
           credentials: 'include',
         });
